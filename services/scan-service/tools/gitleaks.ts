@@ -1,0 +1,4 @@
+import {z} from 'zod';import {redactText} from '../../../packages/findings/redact';import {MAX_REPORT_BYTES,line,text,failed,exposure} from './secrets';import type {RawToolResult} from '../../../packages/findings/schema';
+const row=z.object({RuleID:text,Secret:text,File:text,StartLine:line,Commit:z.string().max(128).optional()});
+/** Gitleaks v8.24.2 JSON report, not terminal/log output. */
+export function parseGitleaks(json:string):RawToolResult{try{if(Buffer.byteLength(json)>MAX_REPORT_BYTES)throw 0;const rows=z.array(row).max(1000).parse(JSON.parse(json));if(rows.some(r=>r.Secret==='REDACTED'||r.Secret.includes('********')))throw 0;const secrets=rows.map(r=>r.Secret);return {tool:'gitleaks',state:'ok',findings:rows.map(r=>{const f=exposure(r.File,r.StartLine,r.Secret,secrets);if(r.Commit&&/^[a-fA-F0-9]{40,64}$/.test(r.Commit))f.fix+=' Observed git commit: '+redactText(r.Commit,secrets);return f;})};}catch{return failed('gitleaks');}}

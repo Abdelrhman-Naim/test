@@ -1,0 +1,21 @@
+[Unit]
+Description=Aegis isolated scan controller
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aegis-audit
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=DOCKER_HOST=unix:///run/user/10001/docker.sock
+ExecStart=/usr/local/bin/npm run scan-service
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=true
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,28 @@
+name: aegis-scan-service
+# Controller is a non-root host systemd process using rootless Docker.
+# No service or job container mounts a Docker socket.
+services:
+  redis:
+    image: ${SCAN_REDIS_IMAGE:?Run npm run scan-service:images first}
+    user: "10001:10001"
+    command: ["redis-server", "/etc/redis/redis.conf"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 1
+    mem_limit: 256m
+    pids_limit: 64
+    ports: ["127.0.0.1:6379:6379"]
+    volumes:
+      - ./services/scan-service/deploy/redis.conf:/etc/redis/redis.conf:ro
+      - ./services/scan-service/deploy-local/users.acl:/etc/redis/users.acl:ro
+      - ./services/scan-service/deploy-local/redis-data:/data
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16777216"]
+    networks: [queue]
+    restart: unless-stopped
+networks:
+  queue:
+    internal: true
+  egress:
+    name: aegis-scan-egress
+    external: true

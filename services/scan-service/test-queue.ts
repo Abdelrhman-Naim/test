@@ -1,0 +1,12 @@
+import {randomUUID} from 'node:crypto';import {failedResults,type Queue,type ScanRequest,type Job,type ToolResult} from './protocol';
+/** Deterministic unit-test backend only. The production entrypoint never constructs this. */
+export class MemoryQueue implements Queue{private jobs=new Map<string,Job>();private nonces=new Map<string,number>();private now:()=>number;constructor(private options={global:2,perOwner:1,leaseMs:30000,now:()=>Date.now()}){this.now=options.now;}
+ private reap(){for(const j of this.jobs.values())if(j.status==='running'&&j.leaseUntil<this.now()){j.status='failed';j.results=failedResults(j.request,'lease_expired');j.toolStatus=Object.fromEntries(j.request.tools.map(t=>[t,'incomplete']));}}
+ async submit(request:ScanRequest){const id=randomUUID();this.jobs.set(id,{id,request:structuredClone(request),status:'queued',results:[],toolStatus:Object.fromEntries(request.tools.map(t=>[t,'incomplete'])),createdAt:this.now(),leaseUntil:0});return id;}
+ async claim(){this.reap();const active=[...this.jobs.values()].filter(j=>j.status==='running');if(active.length>=this.options.global)return;for(const j of this.jobs.values())if(j.status==='queued'&&active.filter(a=>a.request.ownerId===j.request.ownerId).length<this.options.perOwner){j.status='running';j.leaseUntil=this.now()+this.options.leaseMs;j.token=randomUUID();return structuredClone(j);}}
+ async renew(id:string,token:string){this.reap();const j=this.jobs.get(id);if(!j||j.status!=='running'||j.token!==token)return false;j.leaseUntil=this.now()+this.options.leaseMs;return true;}
+ async finish(id:string,token:string,results:ToolResult[],failed=false){this.reap();const j=this.jobs.get(id);if(!j||j.status!=='running'||j.token!==token)return false;j.status=failed?'failed':'done';j.results=structuredClone(results);j.toolStatus=Object.fromEntries(results.map(r=>[r.tool,r.state==='ok'?'ok':'incomplete']));return true;}
+ async get(id:string){this.reap();const j=this.jobs.get(id);return j?structuredClone(j):undefined;}
+ async reserveNonce(key:string){if((this.nonces.get(key)??0)>this.now())return false;this.nonces.set(key,this.now()+121000);return true;}
+ async cancel(id:string){const j=this.jobs.get(id);if(!j||!['queued','running'].includes(j.status))return false;j.status='failed';j.results=failedResults(j.request,'cancelled');j.toolStatus=Object.fromEntries(j.request.tools.map(t=>[t,'incomplete']));return true;}
+}

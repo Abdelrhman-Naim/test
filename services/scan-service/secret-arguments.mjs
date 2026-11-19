@@ -1,0 +1,4 @@
+export const SECRET_VERSIONS={gitleaks:'8.24.2',trufflehog:'3.88.23'};
+export const TRUFFLEHOG_FLAGS=['--json','--no-verification','--no-verification-cache','--no-update','--force-skip-archives','--log-level=2'];
+export const GITLEAKS_FLAGS=['--no-banner','--no-color','--log-level=error','--exit-code=0','--config=/opt/aegis/gitleaks.toml','--ignore-gitleaks-allow','--gitleaks-ignore-path=/opt/aegis/empty.gitleaksignore','--report-format=json','--report-path=/tmp/gitleaks.json'];
+export function secretArguments(tool,mode){if(!['git','directory'].includes(mode)||!Object.hasOwn(SECRET_VERSIONS,tool))throw new Error('FIXED_SECRET_TOOL_REQUIRED');return tool==='gitleaks'?[mode==='git'?'git':'dir','/workspace',...GITLEAKS_FLAGS,...(mode==='git'?['--log-opts=--all']:[])]:[mode==='git'?'git':'filesystem',mode==='git'?'file:///workspace':'/workspace',...TRUFFLEHOG_FLAGS];}

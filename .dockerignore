@@ -1,0 +1,10 @@
+.git
+node_modules
+.next
+.env
+.env.*
+data
+benchmark/generated
+benchmark/external
+services/scan-service/deploy-local
+.superpowers

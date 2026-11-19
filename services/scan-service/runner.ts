@@ -1,0 +1,32 @@
+import {parseSecretExecution} from './tools/execution';
+import {mkdtemp,mkdir} from 'node:fs/promises';import {join,resolve} from 'node:path';import {randomUUID} from 'node:crypto';
+import {DEFAULT_LIMITS,pinnedImage,type Limits,type ContainerSpec} from './limits';import {parseScanRequest,incomplete,type ToolName,type RunInput,type ToolResult} from './protocol';import {TOOL_COMMANDS,historyTool} from './tools';import type {ContainerRuntime} from './runtime';import {validateRepo,makeReadOnly} from './repo-guard.mjs';
+export type RunnerOptions={runtime:ContainerRuntime;images:Partial<Record<ToolName,string>>;helperImage:string;proxyImage:string;workRoot:string;egressNetwork?:string;limits?:Partial<Limits>};
+import {removeWorkspace} from './recovery';
+export async function runTool(tool:ToolName,input:RunInput,options:RunnerOptions,external?:AbortSignal):Promise<ToolResult>{
+ const started=Date.now(),result=incomplete(tool,'not_configured');let inputSafe:RunInput;try{inputSafe=parseScanRequest({...input,tools:[tool],scanId:'internal',ownerId:'internal'});}catch{return {...result,reason:'invalid_input'};}
+ if(inputSafe.kind==='url'||tool==='nuclei')return {...result,reason:'url_execution_deferred_to_task4_and8'};
+ const image=options.images[tool];if(!image)return result;
+ const limits={...DEFAULT_LIMITS,...options.limits},timeout=historyTool(tool)?limits.historyTimeoutMs:limits.timeoutMs;let root='',network='',networkCreated=false;const names:string[]=[];
+ const controller=new AbortController(),signal=external?AbortSignal.any([external,controller.signal]):controller.signal;const timer=setTimeout(()=>controller.abort(),timeout);
+ const bounded=async<T>(promise:Promise<T>):Promise<T>=>{signal.throwIfAborted();let abort!:()=>void;const cancelled=new Promise<never>((_,reject)=>{abort=()=>reject(new Error('RUN_ABORTED'));signal.addEventListener('abort',abort,{once:true});});try{return await Promise.race([promise,cancelled]);}finally{signal.removeEventListener('abort',abort);}};
+ try{
+  pinnedImage(image);pinnedImage(options.helperImage);pinnedImage(options.proxyImage);await mkdir(options.workRoot,{recursive:true,mode:0o700});root=await mkdtemp(join(resolve(options.workRoot),'job-'));const repo=join(root,'repo');await mkdir(repo,{mode:0o700});const key=randomUUID().replaceAll('-','');network='aegis-net-'+key;await options.runtime.createNetwork(network,started+timeout);networkCreated=true;
+  const spec=(role:ContainerSpec['role'],command:string[],image:string):ContainerSpec=>({name:'aegis-'+role+'-'+key,image,role,command,network:role==='scan'?'none':network,deadline:started+timeout});
+  const proxy=spec('proxy',['node','/app/github-proxy.mjs'],options.proxyImage);proxy.connections=[{network:options.egressNetwork??'aegis-scan-egress'}];proxy.env={AEGIS_TIMEOUT_MS:String(timeout)};proxy.readyMarker='AEGIS_PROXY_READY';
+  // The fixed DNS alias exists only on this per-job internal network.
+  // Create with the egress bridge, then connect to the private clone network under a fixed alias.
+  proxy.network=options.egressNetwork??'aegis-scan-egress';proxy.connections=[{network,alias:'github-egress'}];
+  names.push(proxy.name);const proxyRun=await bounded(options.runtime.start(proxy,limits,signal));await bounded(proxyRun.ready);
+  const clone=spec('clone',['node','/app/clone-step.mjs',inputSafe.target,inputSafe.branch,historyTool(tool)?'full':'shallow'],options.helperImage);clone.tmpfs=[{path:'/workspace',bytes:limits.maxRepoBytes+limits.maxHistoryBytes+16*1024**2}];clone.env={AEGIS_TIMEOUT_MS:String(timeout),AEGIS_REPO_LIMITS:JSON.stringify(limits)};clone.readyMarker='AEGIS_CLONE_READY';names.push(clone.name);const cloneRun=await bounded(options.runtime.start(clone,limits,signal));await bounded(cloneRun.ready);signal.throwIfAborted();await options.runtime.copyFrom(clone.name,repo);await validateRepo(repo,limits);await makeReadOnly(repo);
+  await options.runtime.remove(clone.name);names.splice(names.indexOf(clone.name),1);await options.runtime.remove(proxy.name);names.splice(names.indexOf(proxy.name),1);await options.runtime.removeNetwork(network);networkCreated=false;
+  // No network, hooks, submodules, LFS, package install or repository script in the scan phase.
+  const scan=spec('scan',[...TOOL_COMMANDS[tool]],image);scan.bind=[{source:repo,target:'/workspace',readonly:true}];scan.env={HOME:'/tmp',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_LFS_SKIP_SMUDGE:'1',GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_COUNT:'7',GIT_CONFIG_KEY_0:'core.hooksPath',GIT_CONFIG_VALUE_0:'/dev/null',GIT_CONFIG_KEY_1:'safe.directory',GIT_CONFIG_VALUE_1:'/workspace',GIT_CONFIG_KEY_2:'submodule.recurse',GIT_CONFIG_VALUE_2:'false',GIT_CONFIG_KEY_3:'filter.lfs.required',GIT_CONFIG_VALUE_3:'false',GIT_CONFIG_KEY_4:'filter.lfs.smudge',GIT_CONFIG_VALUE_4:'',GIT_CONFIG_KEY_5:'filter.lfs.process',GIT_CONFIG_VALUE_5:'',GIT_CONFIG_KEY_6:'protocol.https.allow',GIT_CONFIG_VALUE_6:'never'};names.push(scan.name);const running=await bounded(options.runtime.start(scan,limits,signal));result.execution.attempted=true;const execution=await bounded(running.completion);result.execution={...result.execution,exitCode:execution.exitCode,outputBytes:execution.outputBytes,truncated:execution.truncated,timedOut:execution.timedOut||signal.aborted};
+  if(historyTool(tool)){const parsed=parseSecretExecution(tool,{...execution,timedOut:execution.timedOut||signal.aborted});result.state=parsed.state;result.findings=parsed.findings;result.reason=parsed.reason;}else result.reason=result.execution.timedOut?'timeout':execution.truncated?'output_limit':execution.runtimeError?'runtime_error':execution.exitCode!==0?'tool_exit_nonzero':'parser_not_enabled_task3';
+  // Drop ALL stdout/stderr: tools can print unknown-format credentials. Adapters in
+  // Tasks5/6/8 must parse+redact in memory before any results may become ok.
+  execution.stdout.fill(0);
+ }catch{result.reason=signal.aborted?'timeout_or_cancelled':'clone_validation_or_runtime_failed';result.execution.timedOut=signal.aborted;}
+ finally{for(const name of names.reverse()){try{await options.runtime.remove(name);}catch{result.reason='cleanup_incomplete';result.state='incomplete';}}if(networkCreated)try{await options.runtime.removeNetwork(network);}catch{result.reason='cleanup_incomplete';result.state='incomplete';}if(root)try{await removeWorkspace(root);}catch{result.reason='cleanup_incomplete';result.state='incomplete';}clearTimeout(timer);result.execution.durationMs=Date.now()-started;}
+ return result;
+}
